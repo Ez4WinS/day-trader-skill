@@ -167,7 +167,7 @@ def fundamentals(companyfacts, quarters=8, years=8):
             "net_income_m": millions(ni), "net_income_yoy_pct": pct(ni, _yoy(q["net_income"], end)),
             "eps_diluted": round(eps, 2) if eps is not None else None,
             "eps_yoy_pct": pct(eps, _yoy(q["eps_diluted"], end)),
-            "q4_derived_from_10k": bool(base.get("derived")),
+            "q4_derived_from_10k": bool(base.get("derived")), "filed": base.get("filed"),
         })
     yends = sorted(set(y["revenue"]) | set(y["net_income"]), reverse=True)[:years]
     yrows = []
@@ -249,21 +249,22 @@ def price_history(monthly_js, daily_js=None):
            "range_high": round(top["h"], 2), "range_high_month": top["month"],
            "range_low": round(bottom["l"], 2), "range_low_month": bottom["month"],
            "from_high_pct": pct(last, top["h"]), "first_month": rows[0]["month"]}
-    same_month = "%d%s" % (rows[-1]["year"] - 8, rows[-1]["month"][4:])   # exactly 8 years back
-    eight = [x for x in rows if x["month"] == same_month]
-    if eight and eight[0]["c"] > 0:
-        out["cagr_8y_pct"] = round(100 * ((last / eight[0]["c"]) ** (1 / 8.0) - 1), 1)
     if daily_js:
         try:
-            dq = (daily_js["chart"]["result"][0].get("indicators", {}).get("quote") or [{}])[0]
-            closes = [c for c in dq.get("close") or [] if c is not None]
-            highs = [h for h in dq.get("high") or [] if h is not None]
-            lows = [x for x in dq.get("low") or [] if x is not None]
+            dr = daily_js["chart"]["result"][0]
+            dq = (dr.get("indicators", {}).get("quote") or [{}])[0]
+            days = [(_dt.datetime(1970, 1, 1) + _dt.timedelta(seconds=ts), dq["close"][i], dq["high"][i], dq["low"][i])
+                    for i, ts in enumerate(dr.get("timestamp") or [])
+                    if dq["close"][i] is not None and dq["high"][i] is not None and dq["low"][i] is not None]
         except (KeyError, IndexError, TypeError):
-            closes = []
-        if closes:
-            out["high_52w"] = round(max(highs or closes), 2)
-            out["low_52w"] = round(min(lows or closes), 2)
+            days = []
+        if days:
+            end = days[-1][0]
+            year_ago = end - _dt.timedelta(days=365)
+            last_year = [d for d in days if d[0] > year_ago]
+            out["high_52w"] = round(max(d[2] for d in last_year), 2)
+            out["low_52w"] = round(min(d[3] for d in last_year), 2)
+            closes = [d[1] for d in days]
             if len(closes) >= 50:
                 out["avg_50d"] = round(sum(closes[-50:]) / 50.0, 2)
             if len(closes) >= 200:
@@ -271,6 +272,14 @@ def price_history(monthly_js, daily_js=None):
             if out.get("avg_50d") and out.get("avg_200d"):
                 out["trend"] = ("up" if last > out["avg_50d"] > out["avg_200d"] else
                                 "down" if last < out["avg_50d"] < out["avg_200d"] else "mixed")
+            try:   # the close on the last trading day at or before the same date 8 years ago
+                back = end.replace(year=end.year - 8)
+            except ValueError:   # 29 February
+                back = end.replace(year=end.year - 8, day=28)
+            before = [d for d in days if d[0] <= back]
+            if before and (back - before[-1][0]).days <= 7 and before[-1][1] > 0:
+                out["cagr_8y_pct"] = round(100 * ((days[-1][1] / before[-1][1]) ** (1 / 8.0) - 1), 1)
+                out["price_8y_ago"] = {"date": before[-1][0].strftime("%Y-%m-%d"), "close": round(before[-1][1], 2)}
     return out
 
 
@@ -280,18 +289,34 @@ def earnings_dates(submissions, today):
         r = submissions["filings"]["recent"]
     except (KeyError, TypeError):
         return {}
-    past = sorted({r["filingDate"][i] for i, f in enumerate(r.get("form") or [])
-                   if f in ("8-K", "8-K/A") and "2.02" in str((r.get("items") or [""] * (i + 1))[i])}, reverse=True)[:6]
+    all_202 = sorted({r["filingDate"][i] for i, f in enumerate(r.get("form") or [])
+                      if f in ("8-K", "8-K/A") and "2.02" in str((r.get("items") or [""] * (i + 1))[i])}, reverse=True)
+    # some companies file other numbers under item 2.02 too (Tesla: deliveries a few weeks before results);
+    # within 45 days only the latest filing counts as that quarter's results
+    past = []
+    for d in all_202:
+        if not past or (_date(past[-1]) - _date(d)).days > 45:
+            past.append(d)
+    past = past[:6]
     out = {"past_results_8k": past}
+    others = [d for d in all_202 if d not in past][:4]
+    if others:
+        out["other_2_02_filings"] = others
     if len(past) >= 2:
         gaps = [(_date(a) - _date(b)).days for a, b in zip(past, past[1:])]
         usual = sorted(gaps)[len(gaps) // 2]
         nxt = _date(past[0]) + _dt.timedelta(days=usual)
-        while nxt < today:
-            nxt += _dt.timedelta(days=usual)
-        out["next_results_estimate"] = nxt.isoformat()
-        out["days_to_next_estimate"] = (nxt - today).days
-        out["note"] = "estimate from the usual gap between past reports, not a confirmed date"
+        if nxt < today and (today - nxt).days <= 35:
+            out["next_results_estimate"] = nxt.isoformat()
+            out["days_to_next_estimate"] = 0
+            out["note"] = ("results look due now: the usual date has passed and no new results 8-K is filed yet "
+                           "(estimate, not a confirmed date)")
+        else:
+            while nxt < today:
+                nxt += _dt.timedelta(days=usual)
+            out["next_results_estimate"] = nxt.isoformat()
+            out["days_to_next_estimate"] = (nxt - today).days
+            out["note"] = "estimate from the usual gap between past reports, not a confirmed date"
     forms = [(r["filingDate"][i], f) for i, f in enumerate(r.get("form") or []) if f in ("10-K", "10-Q")]
     if forms:
         out["latest_report"] = {"form": forms[0][1], "filed": forms[0][0]}

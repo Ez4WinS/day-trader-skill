@@ -405,6 +405,18 @@ def monthly_chart():
                                    "indicators": {"quote": [{"open": o, "high": h, "low": l, "close": c}]}}]}}
 
 
+def daily_chart():
+    """SYNTHETIC daily bars, weekdays 2016-10-03 to 2026-10-01 (not market data): the same doubling every 4 years."""
+    ts, h, l, c = [], [], [], []
+    d, start = DT(2016, 10, 3), DT(2016, 10, 1)
+    while d <= DT(2026, 10, 1):
+        if d.weekday() < 5:
+            p = 30.0 * 2 ** ((d - start).days / (365.25 * 4))
+            ts.append(int((d - DT(1970, 1, 1)).total_seconds())); h.append(p * 1.01); l.append(p * 0.99); c.append(p)
+        d += datetime.timedelta(days=1)
+    return {"chart": {"result": [{"timestamp": ts, "indicators": {"quote": [{"high": h, "low": l, "close": c}]}}]}}
+
+
 class Research(unittest.TestCase):
     def test_apple_quarters_years_and_ttm_from_the_sec_facts(self):
         with open(os.path.join(RDIR, "companyfacts-CIK0000320193.json")) as fh:
@@ -424,14 +436,33 @@ class Research(unittest.TestCase):
         self.assertEqual((e["next_results_estimate"], e["days_to_next_estimate"]), ("2026-10-29", 10))
         self.assertEqual(e["latest_report"], {"form": "10-Q", "filed": "2026-07-31"})
 
+    def test_a_deliveries_8k_is_not_a_results_date(self):
+        # Tesla files its deliveries under item 2.02 too, about three weeks before the results
+        sub = {"filings": {"recent": {"form": ["8-K"] * 5,
+                                      "filingDate": ["2026-10-21", "2026-10-02", "2026-07-22", "2026-07-02", "2026-04-22"],
+                                      "items": ["2.02"] * 5}}}
+        e = research.earnings_dates(sub, datetime.date(2026, 10, 23))
+        self.assertEqual(e["past_results_8k"], ["2026-10-21", "2026-07-22", "2026-04-22"])
+        self.assertEqual(e["other_2_02_filings"], ["2026-10-02", "2026-07-02"])
+        self.assertEqual(e["next_results_estimate"], "2027-01-20")
+
+    def test_results_overdue_are_due_now_not_next_quarter(self):
+        sub = {"filings": {"recent": {"form": ["8-K"] * 3, "filingDate": ["2026-07-22", "2026-04-23", "2026-01-22"],
+                                      "items": ["2.02"] * 3}}}
+        e = research.earnings_dates(sub, datetime.date(2026, 10, 23))
+        self.assertEqual((e["next_results_estimate"], e["days_to_next_estimate"]), ("2026-10-21", 0))
+        self.assertIn("due now", e["note"])
+
     def test_ten_years_of_prices(self):
-        p = research.price_history(monthly_chart())
+        p = research.price_history(monthly_chart(), daily_chart())
         y2022 = [y for y in p["by_year"] if y["year"] == 2022][0]
         y2023 = [y for y in p["by_year"] if y["year"] == 2023][0]
         self.assertAlmostEqual(y2022["return_pct"], -16.8, delta=0.1)   # a year of growth (x1.19) times the 0.7 dip
         self.assertAlmostEqual(y2023["return_pct"], 69.9, delta=0.1)    # back from the dip plus a year of growth
         self.assertEqual((p["range_low_month"], p["range_high_month"]), ("2016-11", "2026-10"))
-        self.assertAlmostEqual(p["cagr_8y_pct"], 18.9, delta=0.2)   # doubling every 4 years
+        self.assertAlmostEqual(p["cagr_8y_pct"], 18.9, delta=0.1)   # doubling every 4 years, exactly 8 years back
+        self.assertEqual(p["price_8y_ago"]["date"], "2018-10-01")
+        self.assertEqual((p["high_52w"] > p["low_52w"], p["trend"]), (True, "up"))
 
 
 class FakeResearchClient(object):
