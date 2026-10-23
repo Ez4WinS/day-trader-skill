@@ -200,6 +200,193 @@ class BotRun(unittest.TestCase):
             self.assertIn("2026-10-19,paper,1,1,0,5.84,TSLA", fh.read())
 
 
+class FakeBrain(object):
+    def __init__(self, entry=None, exit=None):
+        self.asked, self.exits = [], []
+        self._entry = entry or {"decision": "buy", "confidence": 80, "target_r": 1.5, "catalyst": "deal",
+                                "reason": "Neue Nachricht stützt den Ausbruch."}
+        self._exit = exit or {"decision": "hold", "reason": "Nichts Neues."}
+
+    def entry(self, ctx):
+        self.asked.append(ctx)
+        return dict(self._entry)
+
+    def exit(self, ctx):
+        self.exits.append(ctx)
+        return dict(self._exit)
+
+
+class FakeNews(object):
+    def __init__(self):
+        self.items = [{"time": "Mon 08:04", "t": "2026-10-19T08:04:00", "id": "a",
+                       "title": "Tesla-SpaceX Merger Mania Strikes Wall Street Ahead of Earnings", "summary": ""}]
+
+    def headlines(self, symbol, now):
+        return list(self.items)
+
+    def filings(self, symbol, now):
+        return [{"form": "8-K", "filed": "2026-10-19T07:00", "items": ["8.01 other events"]}]
+
+
+class FakeTelegram(object):
+    on = True
+
+    def __init__(self):
+        self.sent = []
+
+    def send(self, text):
+        self.sent.append(text)
+        return True
+
+
+class Claude(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.broker = FakeBroker()
+        self.tg = FakeTelegram()
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def bot(self, brain, dry=False):
+        b = auto.Bot(cfg(), self.broker, folder=self.d, dry_run=dry, out=io.StringIO(),
+                     fetch=lambda s, now: bars(), sleep=lambda s: None, brain=brain, news=FakeNews(), telegram=self.tg)
+        b.load_state(DAY)
+        return b
+
+    def test_claude_reads_the_news_and_buys_with_its_target(self):
+        brain = FakeBrain()
+        self.bot(brain).tick(at("10:15"))
+        ctx = brain.asked[0]
+        self.assertEqual(ctx["price"]["breakout_close"], 364.18)
+        self.assertEqual(ctx["price"]["stop_if_bought"], 358.32)
+        self.assertIn("Merger", ctx["headlines"][0]["title"])
+        self.assertEqual(ctx["sec_8k_filings"][0]["items"], ["8.01 other events"])
+        self.assertEqual(self.broker.placed[0]["take_profit"], {"limit_price": "372.97"})   # 364.18 + 1.5 x 5.86
+        self.assertIn("KAUF TSLA", self.tg.sent[-1])
+        self.assertIn("Neue Nachricht", self.tg.sent[-1])
+
+    def test_a_skip_sends_nothing_to_the_broker(self):
+        brain = FakeBrain(entry={"decision": "skip", "confidence": 30, "target_r": 1.0, "catalyst": "",
+                                 "reason": "Kein News-Grund."})
+        b = self.bot(brain)
+        b.tick(at("10:15"))
+        self.assertEqual(self.broker.placed, [])
+        self.assertTrue(b.state["tried"]["TSLA"].startswith("ai: skip"))
+        self.assertIn("übersprungen", self.tg.sent[-1])
+
+    def test_low_confidence_buy_is_a_skip(self):
+        brain = FakeBrain(entry={"decision": "buy", "confidence": 40, "target_r": 1.0, "catalyst": "", "reason": "Vage."})
+        self.bot(brain).tick(at("10:15"))
+        self.assertEqual(self.broker.placed, [])
+
+    def test_claude_cannot_break_a_risk_rule(self):
+        brain = FakeBrain()
+        b = auto.Bot(cfg(max_loss_per_trade_usd=5), self.broker, folder=self.d, out=io.StringIO(),
+                     fetch=lambda s, now: bars(), sleep=lambda s: None, brain=brain, news=FakeNews(), telegram=self.tg)
+        b.load_state(DAY)
+        b.tick(at("10:15"))
+        self.assertEqual(self.broker.placed, [])
+        self.assertIn("Risiko-Regel", self.tg.sent[-1])
+
+    def test_new_bad_news_sells_an_open_trade(self):
+        brain = FakeBrain(exit={"decision": "sell", "reason": "Herabstufung."})
+        b = self.bot(brain)
+        b.tick(at("10:15"))
+        self.broker.held = [{"symbol": "TSLA", "qty": "1", "avg_entry_price": "364.2", "current_price": "365"}]
+        self.broker.open_orders = [{"id": "o-1", "symbol": "TSLA", "status": "filled",
+                                    "legs": [{"id": "tp", "status": "new"}, {"id": "sl", "status": "held"}]}]
+        b.tick(at("10:20"))
+        self.assertEqual(brain.exits, [])   # no new headline yet: Claude is not asked
+        b.news.items.append({"time": "Mon 10:18", "t": "2026-10-19T10:18:00", "id": "b",
+                             "title": "Analyst downgrades Tesla", "summary": ""})
+        b.tick(at("10:25"))
+        self.assertEqual([h["title"] for h in brain.exits[0]["new_headlines"]], ["Analyst downgrades Tesla"])
+        self.assertEqual(self.broker.canceled, ["tp", "sl"])
+        self.assertEqual(self.broker.closed, ["TSLA"])
+        self.assertIn("VERKAUF TSLA", self.tg.sent[-1])
+
+    def test_dry_run_messages_are_marked(self):
+        b = auto.Bot(cfg(), self.broker, folder=self.d, dry_run=True, out=io.StringIO(),
+                     fetch=lambda s, now: bars(), sleep=lambda s: None, brain=FakeBrain(), news=FakeNews(),
+                     telegram=self.tg)
+        b.load_state(DAY)
+        b.tick(at("10:15"))
+        self.assertTrue(self.tg.sent[-1].startswith("[TEST]"))
+        self.assertEqual(self.broker.placed, [])
+
+
+class Res(object):
+    def __init__(self, text, stop="end_turn"):
+        self.stop_reason = stop
+        self.content = [type("B", (), {"type": "text", "text": text})()]
+
+
+class FakeClient(object):
+    def __init__(self, res):
+        self.calls = []
+        msgs = type("M", (), {"create": lambda _s, **kw: (self.calls.append(kw), res)[1]})()
+        self.beta = type("Beta", (), {"messages": msgs})()
+
+
+@unittest.skipUnless(__import__("importlib").util.find_spec("anthropic"), "pip install anthropic")
+class BrainCalls(unittest.TestCase):
+    def test_request_shape_and_answer(self):
+        ans = {"decision": "buy", "confidence": 77, "target_r": 2.0, "catalyst": "beat", "reason": "Zahlen stark."}
+        client = FakeClient(Res(json.dumps(ans)))
+        out = auto.Brain("claude-opus-5-5", "medium", client=client).entry({"symbol": "TSLA"})
+        self.assertEqual(out, ans)
+        kw = client.calls[0]
+        self.assertEqual(kw["model"], "claude-opus-5-5")
+        self.assertEqual(kw["fallbacks"], "default")
+        self.assertEqual(kw["betas"], ["server-side-fallback-2026-07-01"])
+        self.assertEqual(kw["output_config"]["effort"], "medium")
+        self.assertEqual(kw["output_config"]["format"]["schema"], auto.ENTRY_SCHEMA)
+
+    def test_refusal_or_garbage_is_never_a_buy(self):
+        for res in (Res("", stop="refusal"), Res("not json")):
+            out = auto.Brain("claude-opus-5-5", "medium", client=FakeClient(res)).entry({})
+            self.assertEqual(out["decision"], "skip")
+            out = auto.Brain("claude-opus-5-5", "medium", client=FakeClient(res)).exit({})
+            self.assertEqual(out["decision"], "hold")
+
+
+# SYNTHETIC feeds (shapes of Yahoo's RSS and SEC's submissions JSON, not real items)
+RSS = b"""<?xml version="1.0"?><rss><channel>
+<item><title>Fresh headline</title><guid>g1</guid><pubDate>Mon, 19 Oct 2026 13:50:00 +0000</pubDate></item>
+<item><title>Old headline</title><guid>g2</guid><pubDate>Fri, 16 Oct 2026 13:50:00 +0000</pubDate></item>
+<item><title>From the future</title><guid>g3</guid><pubDate>Mon, 19 Oct 2026 18:00:00 +0000</pubDate></item>
+</channel></rss>"""
+SUB = {"filings": {"recent": {"form": ["8-K", "10-Q", "8-K"], "filingDate": ["2026-10-19", "2026-10-18", "2026-09-01"],
+                              "acceptanceDateTime": ["2026-10-19T07:02:11.000Z", "x", "y"],
+                              "items": ["2.02,9.01", "", "5.02"]}}}
+
+
+class Feeds(unittest.TestCase):
+    def test_rss_last_24h_in_new_york_time(self):
+        items = auto.parse_rss(RSS, at("10:15"), -4.0, 24)
+        self.assertEqual([(i["title"], i["time"]) for i in items], [("Fresh headline", "Mon 09:50")])
+
+    def test_8k_items_are_named(self):
+        f = auto.recent_8k(SUB, at("10:15"))
+        self.assertEqual(f, [{"form": "8-K", "filed": "2026-10-19T07:02", "items": ["2.02 quarterly results", "9.01"]}])
+
+    def test_telegram_errors_never_show_the_token(self):
+        import urllib.error
+        logs = []
+
+        def boom(req, timeout=0):
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, io.BytesIO(b'{"description": "no"}'))
+        old, auto._urlopen = auto._urlopen, boom
+        try:
+            ok = auto.Telegram("123:SECRET", "42", log=logs.append).send("hi")
+        finally:
+            auto._urlopen = old
+        self.assertFalse(ok)
+        self.assertNotIn("SECRET", " ".join(logs))
+        self.assertIn("HTTP 401 from Telegram", logs[0])
+
+
 class Safety(unittest.TestCase):
     def test_keys_only_from_the_environment(self):
         with self.assertRaises(auto.AutopilotError) as cm:

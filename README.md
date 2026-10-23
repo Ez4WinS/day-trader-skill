@@ -54,7 +54,7 @@ Project-local instead of global: copy the same folders into your repo's
 top of a chat and it runs as a mode. You lose the Python tools, but the method
 works.
 
-The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
+The tools need Python 3.8 or newer. Nothing to pip install, except `anthropic` for the Autopilot's Claude decisions. The SEC tools
 (news filings) ask you to identify yourself: put your name and
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
@@ -72,7 +72,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-budget` | Budget Manager | Sizes every position to your budget and your max loss per trade. |
 | `/trader-broker` | Order Executor | Sends approved orders to your broker, paper trading by default, never without your yes. |
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
-| `/trader-autopilot` | Autopilot | Trades the opening-range breakout on its own, paper by default, inside your limits, and flattens by the close. |
+| `/trader-autopilot` | Autopilot | Trades breakouts on its own, lets Claude read the news and decide each trade, holds your limits, flattens by the close and reports on Telegram. Paper by default. |
 
 ## How to use it
 
@@ -168,7 +168,9 @@ own "Allow once / Deny" card is a second check. No options, margin, short
 selling or leverage unless you turn them on.
 
 **The Autopilot does not ask.** `/trader-autopilot` sends every order that
-passes your limits on its own: starting it is your one yes. It trades
+Claude wants and your limits pass, on its own: starting it is your one yes.
+Claude reads the news and decides; it cannot change a limit, size a trade or
+move a stop. It needs `pip install anthropic` and an Anthropic API key. It trades
 Alpaca's paper account unless you set `"paper": false` and start it with
 `--live` yourself. Without a yes per order, your limits are the only brake.
 
