@@ -53,9 +53,10 @@ python3 "${CLAUDE_SKILL_DIR}/autopilot.py" flatten           # cancel the bot's 
 ## A session (New York time; Germany is +6 hours, +5 from Oct 26 to Oct 30 2026)
 
 0. **Before the open** (the bot started up to 2 hours before 09:30): every
-   watchlist stock gets a full analysis, `research_workers` at a time; one
-   stored in the last `research_max_age_days` (7) is reused unless the
-   company filed a new 10-Q, 10-K or results 8-K since. See "The analysis".
+   watchlist stock without an analysis gets the deep one, once; the others
+   get today's numbers for free and a short Claude update only when there
+   is something new (results, a big move). `research_workers` at a time.
+   See "The analysis".
    Telegram gets the strongest, the weakest and the ones reporting within
    2 days. Started later, a stock is analysed when it first breaks out.
 1. **09:30 to 09:45**: the opening range is the high and low of the 9:30,
@@ -108,14 +109,29 @@ python3 "${CLAUDE_SKILL_DIR}/autopilot.py" flatten           # cancel the bot's 
   avoid), score, trend, next results date and "results within 2 days".
 - Stored in `trader/autopilot/research/<TICKER>.json`.
 
+**Deep once, then only what is new:**
+
+| what | when | Claude |
+| --- | --- | --- |
+| the deep analysis above | once per stock; again after `research_full_every_days` (180) | yes, with up to `research_web_searches` (5) searches |
+| the numbers (price picture, trend, 52 weeks, results dates, headlines) | once a day | no, free |
+| the SEC fundamentals | when the company filed new results | no, free |
+| an update: the old report plus only what changed (new quarters, price then and now, dates, headlines) | when new results were filed since the report, or the price moved `research_update_move_pct` (15) % since it | yes, with up to `research_update_web_searches` (2) searches |
+
+Each update is logged in the file's `updates` list with its reason.
+
 Banks, insurers and holding companies report differently: some fields can be
 empty, and the report says so instead of guessing. Without `sec_user_agent`
 there are no SEC numbers, only prices and the web search.
 
-**Cost**: one full analysis with Claude Opus 5.5 and 5 searches is roughly
-$0.20 to $0.40. 50 stocks once a week is about $10 to $20 a week; each
-breakout decision a few cents more. `research_web_searches: 0`,
-`research_effort: "medium"` or a shorter watchlist cut that down.
+**Cost** (estimates; check the Usage page in the Anthropic console): a deep
+analysis with 5 searches is roughly $0.25 to $0.40 with Claude Opus 5.5 and
+$0.13 to $0.20 with Claude Sonnet 5.5, paid once per stock. An update is a
+few cents, about four times a year per stock (results) plus big moves. A
+breakout decision is about $0.03 (Opus) or $0.015 (Sonnet). Day to day, the
+decisions are most of the bill. `"model": "claude-sonnet-5-5"` with
+`"effort": "medium"` and `"research_effort": "medium"` halves it; a shorter
+watchlist cuts it further.
 
 When Claude cannot be reached, refuses, or answers nonsense, a candidate is
 skipped and an open trade is held. No answer is never a buy.
@@ -146,7 +162,8 @@ to Alpaca.
 The `"autopilot"` block: `watchlist` (the 50 biggest and best-known US
 stocks), `entries_until` ("11:30"), `ai` (true), `research` (true),
 `research_effort` ("high"), `research_web_searches` (5),
-`research_max_age_days` (7), `research_workers` (4), `model` ("claude-opus-5-5"),
+`research_full_every_days` (180), `research_update_move_pct` (15),
+`research_update_web_searches` (2), `research_workers` (4), `model` ("claude-opus-5-5"),
 `effort` ("medium"; "low" is faster and cheaper, "high" more thorough),
 `min_confidence` (60), `news_hours` (24), `workers` (8), `target_r` (1.0,
 used only with `"ai": false`), `min_stop_pct` (0.1), `data` ("yahoo" or

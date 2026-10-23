@@ -527,16 +527,67 @@ class ResearchInTheDecision(unittest.TestCase):
         finally:
             shutil.rmtree(d)
 
-    def test_a_stored_analysis_is_reused_until_it_is_old(self):
+    def test_deep_once_then_only_what_is_new(self):
         d = tempfile.mkdtemp()
         try:
-            rs = auto.Researcher(cfg(), d, None, None, lambda m: None)
-            old = {"symbol": "AAPL", "made": "2026-10-15T09:00:00", "verdict": {}}
-            self.assertTrue(rs.fresh(old, at("10:15")))
-            self.assertFalse(rs.fresh(dict(old, made="2026-10-01T09:00:00"), at("10:15")))
-            self.assertFalse(rs.fresh(None, at("10:15")))
+            brain = CountingBrain()
+            rs = auto.Researcher(cfg(), d, None, brain, lambda m: None)
+            world = {"price": 100.0, "results": "2026-07-30", "quarters": ["2026-06-27"]}
+
+            def dossier(symbol, now, fundamentals=True):
+                out = {"symbol": symbol, "name": "Demo Inc.",
+                       "price": {"last_price": world["price"], "trend": "up"},
+                       "earnings": {"past_results_8k": [world["results"]], "latest_report": {"filed": world["results"]}},
+                       "recent_headlines": []}
+                if fundamentals:
+                    brain.fundamentals_fetched += 1
+                    out["fundamentals"] = {"quarters": [{"quarter_end": q} for q in world["quarters"]]}
+                return out
+            rs.dossier = dossier
+            day = lambda n: DT(2026, 10, 19 + n, 9, 0)
+
+            first = rs.get("DEMO", day(0))                     # nothing stored: the deep analysis, once
+            self.assertEqual((first["kind"], brain.deep, brain.updates), ("deep", 1, 0))
+            rs.get("DEMO", day(0))                             # same day: the stored one, nothing fetched
+            world["price"] = 104.0
+            r = rs.get("DEMO", day(1))                         # next day, nothing new: numbers only, no Claude
+            self.assertEqual((brain.deep, brain.updates, brain.fundamentals_fetched), (1, 0, 1))
+            self.assertEqual(r["numbers"]["price"]["last_price"], 104.0)
+
+            world.update(results="2026-10-29", quarters=["2026-09-26", "2026-06-27"])
+            r = rs.get("DEMO", day(2))                         # new results: an update with only the new quarter
+            self.assertEqual((brain.deep, brain.updates), (1, 1))
+            self.assertEqual([q["quarter_end"] for q in brain.last_delta["new_quarters"]], ["2026-09-26"])
+            self.assertEqual(brain.last_delta["why_update"], "new results filed 2026-10-29")
+            self.assertEqual((r["kind"], r["results_seen"], r["report"]), ("updated", "2026-10-29", "Bericht v2"))
+
+            world["price"] = 125.0                             # +20% since the report: another update
+            rs.get("DEMO", day(3))
+            self.assertEqual(brain.updates, 2)
+            self.assertIn("price moved +20.2%", brain.last_delta["why_update"])
+
+            r = rs.get("DEMO", DT(2027, 4, 20, 9, 0))         # after research_full_every_days: deep again
+            self.assertEqual((brain.deep, r["kind"]), (2, "deep"))
         finally:
             shutil.rmtree(d)
+
+
+class CountingBrain(object):
+    def __init__(self):
+        self.deep = self.updates = self.fundamentals_fetched = 0
+        self.last_delta = None
+
+    def research(self, dossier, web_searches=5, effort="high"):
+        self.deep += 1
+        return "Bericht v1", None
+
+    def update_report(self, report, delta, web_searches=2, effort="medium"):
+        self.updates += 1
+        self.last_delta = delta
+        return "Bericht v%d" % (self.updates + 1), None
+
+    def verdict(self, symbol, report):
+        return {"rating": "good", "score": 70}
 
 
 class Safety(unittest.TestCase):
