@@ -1,10 +1,10 @@
 # The Day Trader skill
 
-11 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
+10 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, replay every outcome before you risk a dollar, and let an autopilot trade the rules on its own.
 
 Free, MIT, no signup, no API key. The tools are plain Python that read free
-public data: Yahoo Finance charts, Nasdaq Trader's symbol lists, SEC EDGAR
-and the House Clerk.
+public data: Yahoo Finance charts, Nasdaq Trader's symbol lists and SEC
+EDGAR.
 
 One scans thousands of charts for setups. Another tracks breaking news on
 every stock you watch. One watches a setup bar by bar and tells you the moment
@@ -13,8 +13,10 @@ craziest one is the Time Machine: before you risk a dollar, it replays the
 rest of the session 10,000 times from the stock's own recent bars, plus every
 past day the same setup fired, and tells you the honest odds.
 
-And no trade goes through until you say yes. Nothing in this pack can place
-an order on its own. Paper trading is the default.
+Two ways to trade. Step by step, no trade goes through until you say yes.
+Or switch on the Autopilot: it runs the same rule and the same limits on its
+own, on Alpaca's paper account by default, and sends every order that passes
+the rules without asking. Paper trading is the default either way.
 
 > **Looking for the original Trader skill?** Copy an investor's 13F, the
 > stock screener, tax lots and rebalancing live in
@@ -53,11 +55,11 @@ top of a chat and it runs as a mode. You lose the Python tools, but the method
 works.
 
 The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
-(news filings, the analyst) ask you to identify yourself: put your name and
+(news filings) ask you to identify yourself: put your name and
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
-## The eleven
+## The ten
 
 | command | job | what it does |
 | --- | --- | --- |
@@ -70,8 +72,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-budget` | Budget Manager | Sizes every position to your budget and your max loss per trade. |
 | `/trader-broker` | Order Executor | Sends approved orders to your broker, paper trading by default, never without your yes. |
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
-| `/trader-analyst` | Earnings Analyst | Reads earnings reports and sums up what changed. |
-| `/trader-pelosi` | Pelosi Tracker | Reads Congress's stock-trade disclosures the minute they are filed. |
+| `/trader-autopilot` | Autopilot | Trades the opening-range breakout on its own, paper by default, inside your limits, and flattens by the close. |
 
 ## How to use it
 
@@ -81,7 +82,7 @@ what the last one wrote:
 ```
 scanner -> news -> entry -> exit -> timemachine -> budget -> risk -> broker   (one trade)
 alerts: stop, target, flat by the close                                       (while it is open)
-news / analyst / pelosi                                                        (on a schedule)
+autopilot: the whole chain on its own, no yes per order, paper by default   (hands off)
 ```
 
 An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
@@ -139,8 +140,8 @@ python3 trader-risk/check.py                                           # PASS / 
 python3 trader-broker/ticket.py show                                   # the tickets, READY or not
 python3 trader-alerts/alerts.py add --from-plan                        # stop, target, flat by close
 python3 trader-alerts/alerts.py check                                  # rings what hit, once
-python3 trader-analyst/facts.py TSLA                                   # quarters, growth, EPS
-python3 trader-pelosi/ptr.py index --member pelosi                     # her PTRs this year
+python3 trader-autopilot/autopilot.py run --dry-run                    # a session hands off, nothing sent
+python3 trader-autopilot/autopilot.py run                              # a session hands off, orders to Alpaca
 ```
 
 ```bash
@@ -149,8 +150,8 @@ python3 -m unittest discover -s tests -v
 
 The tests run offline, on fixtures cut from real data: TSLA's 5-minute bars
 for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
-TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
-real XBRL facts. They reproduce every number in the example above.
+TSLA headlines that morning, and a fake broker for the Autopilot so no order
+ever leaves. They reproduce every number in the example above.
 
 ## Fine print
 
@@ -159,12 +160,17 @@ arithmetic. It does not know your situation and it cannot see the future.
 Most people who day trade lose money. You can lose money. Decide for
 yourself, and talk to a licensed professional if you need advice.
 
-**No trade goes through until you say yes.** Only `/trader-broker` can lead to
-an order, and only after `/trader-risk` passes that exact order and you type
-yes for it in the chat. Set your brokerage tool to "Needs approval" in Claude
+**Step by step, no trade goes through until you say yes.** `/trader-broker`
+leads to an order only after `/trader-risk` passes that exact order and you
+type yes for it in the chat. Set your brokerage tool to "Needs approval" in Claude
 (Customize, Connectors, tool permissions), never "Always allow", so Claude's
 own "Allow once / Deny" card is a second check. No options, margin, short
 selling or leverage unless you turn them on.
+
+**The Autopilot does not ask.** `/trader-autopilot` sends every order that
+passes your limits on its own: starting it is your one yes. It trades
+Alpaca's paper account unless you set `"paper": false` and start it with
+`--live` yourself. Without a yes per order, your limits are the only brake.
 
 **Paper first.** `"paper": true` is the default in `config.example.json`, and
 Alpaca's MCP server defaults to its paper account. Keys live in environment
@@ -189,10 +195,6 @@ on June 4, 2026 (Regulatory Notice 26-10), and brokers may phase the change
 in until October 20, 2027, so yours may still apply the old rule. If it does,
 set `"pdt_guard": true` and `/trader-risk` counts your day trades.
 
-**Congress's trades are public, not inside information.** Members must disclose
-trades over $1,000 within 45 days (the STOCK Act). The Pelosi skill reads those
-public filings the minute they post.
-
 **Taxes.** Day-trading gains are short-term gains, and frequent trading makes
 wash sales likely. Nothing here is tax advice.
 
@@ -208,8 +210,7 @@ trader-risk/        SKILL.md, check.py
 trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
 trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
-trader-analyst/     SKILL.md, facts.py, metrics.example.json
-trader-pelosi/      SKILL.md, ptr.py
+trader-autopilot/   SKILL.md, autopilot.py
 tests/              unittest suite + offline fixtures
 ```
 
