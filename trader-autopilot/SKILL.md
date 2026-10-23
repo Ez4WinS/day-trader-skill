@@ -127,12 +127,26 @@ used only with `"ai": false`), `min_stop_pct` (0.1), `data` ("yahoo" or
 
 ## On a Raspberry Pi
 
-A Pi 5 (4 or 8 GB, Raspberry Pi OS 64-bit) runs it easily: the bot is plain
-Python plus the Anthropic SDK, and Claude runs in the cloud. Keep the
-secrets in a file only the user can read, and let systemd start the bot:
+A Pi 4 or 5 (4 GB or more, Raspberry Pi OS 64-bit) runs it easily: the bot is
+plain Python plus the Anthropic SDK, and Claude runs in the cloud. Raspberry
+Pi OS does not allow a system-wide `pip install`, so the SDK goes into a
+virtual environment. Below, `USER` is the user name chosen in the Raspberry
+Pi Imager.
 
 ```bash
-# ~/trading/secrets.env  (chmod 600 ~/trading/secrets.env)
+sudo apt update && sudo apt full-upgrade -y
+sudo apt install -y git python3-venv
+git clone -b claude/keen-volta-i1oeae https://github.com/ez4wins/day-trader-skill.git ~/day-trader-skill
+mkdir -p ~/trading/trader
+cp ~/day-trader-skill/trader-budget/config.example.json ~/trading/trader/config.json   # then set the limits
+python3 -m venv ~/trading/venv
+~/trading/venv/bin/pip install anthropic
+```
+
+Keep the secrets in a file only the user can read (`nano ~/trading/secrets.env`,
+then `chmod 600 ~/trading/secrets.env`):
+
+```bash
 ALPACA_API_KEY=...
 ALPACA_SECRET_KEY=...
 ANTHROPIC_API_KEY=...
@@ -140,18 +154,20 @@ TELEGRAM_BOT_TOKEN=...
 TELEGRAM_CHAT_ID=...
 ```
 
+Let systemd start the bot at boot and after a crash
+(`sudo nano /etc/systemd/system/autopilot.service`):
+
 ```ini
-# /etc/systemd/system/autopilot.service
 [Unit]
 Description=trader-autopilot
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=pi
-WorkingDirectory=/home/pi/trading
-EnvironmentFile=/home/pi/trading/secrets.env
-ExecStart=/usr/bin/python3 /home/pi/day-trader-skill/trader-autopilot/autopilot.py run --forever
+User=USER
+WorkingDirectory=/home/USER/trading
+EnvironmentFile=/home/USER/trading/secrets.env
+ExecStart=/home/USER/trading/venv/bin/python /home/USER/day-trader-skill/trader-autopilot/autopilot.py run --forever
 Restart=on-failure
 RestartSec=30
 
@@ -159,9 +175,11 @@ RestartSec=30
 WantedBy=multi-user.target
 ```
 
-`sudo systemctl enable --now autopilot`, then `journalctl -u autopilot -f`
-shows the log. A restart never doubles an order (one `client_order_id` per
-stock per day, plus the state file).
+`sudo systemctl daemon-reload && sudo systemctl enable --now autopilot`, then
+`journalctl -u autopilot -f` shows the log. For a first dry run, put
+`--dry-run` after `--forever` in `ExecStart`, then remove it and restart. A
+restart never doubles an order (one `client_order_id` per stock per day, plus
+the state file).
 
 ## Steps when the user asks
 
