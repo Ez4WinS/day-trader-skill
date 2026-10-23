@@ -72,7 +72,7 @@ or in the `SEC_USER_AGENT` environment variable.
 | `/trader-budget` | Budget Manager | Sizes every position to your budget and your max loss per trade. |
 | `/trader-broker` | Order Executor | Sends approved orders to your broker, paper trading by default, never without your yes. |
 | `/trader-alerts` | Price Alerts | Rings when a price, a stop or the opening bell hits. |
-| `/trader-autopilot` | Autopilot | Trades breakouts on its own, lets Claude read the news and decide each trade, holds your limits, flattens by the close and reports on Telegram. Paper by default. |
+| `/trader-autopilot` | Autopilot | Analyses every stock in depth (8 quarters, 8 years, 10 years of prices and why), trades breakouts on its own with Claude reading the analysis and the news, holds your limits, flattens by the close and reports on Telegram. Paper by default. |
 
 ## How to use it
 
@@ -212,7 +212,7 @@ trader-risk/        SKILL.md, check.py
 trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
 trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
-trader-autopilot/   SKILL.md, autopilot.py
+trader-autopilot/   SKILL.md, autopilot.py, research.py
 tests/              unittest suite + offline fixtures
 ```
 

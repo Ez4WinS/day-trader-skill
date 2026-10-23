@@ -11,12 +11,16 @@ description: >-
   loss, trades per day, entry window) and is sent as ONE bracket order. Open
   trades with new bad news go back to Claude to sell early. Everything is
   closed by 15:55 New York; every decision and the daily report go to your
-  phone on Telegram. Runs on your computer or a Raspberry Pi. Use when the
+  phone on Telegram. Before the open it analyses every stock in depth: 8
+  quarters and 8 fiscal years from the SEC filings, 10 years of prices with
+  the highs and lows and why (Claude searches the web), the next results
+  date, and a rating. Runs on your computer or a Raspberry Pi. Use when the
   user says "trade on your own", "run the bot", "autopilot", "trade
   automatically", "no confirmation", "trade on the news", "start the bot",
   "stop the bot", "how did the bot do", "set up Telegram", "run it on a
-  Raspberry Pi", or "close everything".
-argument-hint: "[run | status | report | flatten | telegram-test]"
+  Raspberry Pi", "analyse AAPL", "full analysis of a stock", or "close
+  everything".
+argument-hint: "[run | status | report | flatten | telegram-test | research TICKER]"
 ---
 
 # trader-autopilot
@@ -37,6 +41,8 @@ it with `--live` themselves.
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/autopilot.py" status            # account, market clock, Claude and Telegram on/off
 python3 "${CLAUDE_SKILL_DIR}/autopilot.py" telegram-test     # one test message to the phone
+python3 "${CLAUDE_SKILL_DIR}/autopilot.py" research AAPL     # full analysis of one stock (no Alpaca needed)
+python3 "${CLAUDE_SKILL_DIR}/autopilot.py" research AAPL --fresh   # ignore the stored analysis
 python3 "${CLAUDE_SKILL_DIR}/autopilot.py" run --dry-run     # a session: Claude decides, nothing is sent
 python3 "${CLAUDE_SKILL_DIR}/autopilot.py" run               # a session, orders go to Alpaca
 python3 "${CLAUDE_SKILL_DIR}/autopilot.py" run --forever     # every session until Ctrl+C
@@ -46,6 +52,12 @@ python3 "${CLAUDE_SKILL_DIR}/autopilot.py" flatten           # cancel the bot's 
 
 ## A session (New York time; Germany is +6 hours, +5 from Oct 26 to Oct 30 2026)
 
+0. **Before the open** (the bot started up to 2 hours before 09:30): every
+   watchlist stock gets a full analysis, `research_workers` at a time; one
+   stored in the last `research_max_age_days` (7) is reused unless the
+   company filed a new 10-Q, 10-K or results 8-K since. See "The analysis".
+   Telegram gets the strongest, the weakest and the ones reporting within
+   2 days. Started later, a stock is analysed when it first breaks out.
 1. **09:30 to 09:45**: the opening range is the high and low of the 9:30,
    9:35 and 9:40 five-minute bars, for every stock on the watchlist.
 2. **09:45 to `entries_until` (11:30)**: after each closed bar the bot checks
@@ -54,8 +66,9 @@ python3 "${CLAUDE_SKILL_DIR}/autopilot.py" flatten           # cancel the bot's 
    the bot did not see live (more than 8 minutes old) is skipped, never chased.
 3. **Claude decides**: for each candidate, in parallel, the bot sends the
    numbers (breakout, range, stop, gap, today's move, how many stocks broke
-   out) plus the last `news_hours` of Yahoo headlines and the SEC 8-K filings
-   of the last 3 days. Claude answers buy or skip, a confidence (0 to 100)
+   out), the last `news_hours` of Yahoo headlines, the SEC 8-K filings of the
+   last 3 days, and the stock's analysis (verdict, 10-year price picture,
+   last 4 quarters, next results date). Claude answers buy or skip, a confidence (0 to 100)
    and a target of 1, 1.5 or 2 times the risk, with a short reason in German.
    A buy under `min_confidence` (60) counts as a skip.
 4. **The rules decide last**: buys go highest confidence first through the
@@ -68,6 +81,41 @@ python3 "${CLAUDE_SKILL_DIR}/autopilot.py" flatten           # cancel the bot's 
 7. **After 16:00**: `trader/autopilot/<date>.json` (every trade, every
    skipped stock and why, every Claude answer with the headlines it saw), a
    line in `trader/autopilot/journal.csv`, and the report on Telegram.
+
+## The analysis
+
+`research.py` computes the numbers, Claude reads and explains them:
+
+- **Quarters**: the last 8 (revenue, gross / operating / net margin, net
+  income, diluted EPS, each against the same quarter a year earlier) from
+  the SEC's XBRL company facts. A fourth quarter is the 10-K year minus its
+  three 10-Qs.
+- **Fiscal years**: the last 8 (revenue growth, net income and margin, EPS,
+  operating cash flow, capex, free cash flow) plus the latest balance sheet
+  (cash, long-term debt, equity, assets, liabilities, shares).
+- **Prices**: 10 years of monthly bars from Yahoo: every calendar year's
+  return with its high and low and their months, the 10-year high and low,
+  the distance from the high, the yearly growth rate over exactly 8 years,
+  the 52-week range and the 50/200-day trend.
+- **Results dates**: the past quarterly-results 8-Ks (item 2.02) and the next
+  date they suggest, marked as an estimate.
+- **Claude** (`research_effort`, "high") gets all of that, searches the web
+  up to `research_web_searches` (5) times for why the big highs and lows
+  happened, what the last results and guidance said and the confirmed next
+  date, and writes a German report: company, quarters, fiscal years, price
+  history, dates, chances, risks, verdict for a long day trade. A second
+  short call condenses it into rating (strong / good / neutral / weak /
+  avoid), score, trend, next results date and "results within 2 days".
+- Stored in `trader/autopilot/research/<TICKER>.json`.
+
+Banks, insurers and holding companies report differently: some fields can be
+empty, and the report says so instead of guessing. Without `sec_user_agent`
+there are no SEC numbers, only prices and the web search.
+
+**Cost**: one full analysis with Claude Opus 5.5 and 5 searches is roughly
+$0.20 to $0.40. 50 stocks once a week is about $10 to $20 a week; each
+breakout decision a few cents more. `research_web_searches: 0`,
+`research_effort: "medium"` or a shorter watchlist cut that down.
 
 When Claude cannot be reached, refuses, or answers nonsense, a candidate is
 skipped and an open trade is held. No answer is never a buy.
@@ -96,7 +144,9 @@ to Alpaca.
 | `sec_user_agent` | "" | "Your Name you@mail.com"; without it, no SEC filings |
 
 The `"autopilot"` block: `watchlist` (the 50 biggest and best-known US
-stocks), `entries_until` ("11:30"), `ai` (true), `model` ("claude-opus-5-5"),
+stocks), `entries_until` ("11:30"), `ai` (true), `research` (true),
+`research_effort` ("high"), `research_web_searches` (5),
+`research_max_age_days` (7), `research_workers` (4), `model` ("claude-opus-5-5"),
 `effort` ("medium"; "low" is faster and cheaper, "high" more thorough),
 `min_confidence` (60), `news_hours` (24), `workers` (8), `target_r` (1.0,
 used only with `"ai": false`), `min_stop_pct` (0.1), `data` ("yahoo" or
@@ -121,7 +171,9 @@ used only with `"ai": false`), `min_stop_pct` (0.1), `data` ("yahoo" or
    message and make a new key.
 5. Copy `trader-budget/config.example.json` to `trader/config.json` and set
    the limits above (the example ships with a $5,000 budget).
-6. `telegram-test`, then `status`, then one session of `run --dry-run`.
+6. `research AAPL` first: it needs only Claude (and `sec_user_agent`), not
+   Alpaca, and shows exactly what the bot will know about a stock.
+7. `telegram-test`, then `status`, then one session of `run --dry-run`.
    Read `trader/autopilot/<date>.json` with the user: what Claude bought,
    skipped and why. Then `run`.
 
@@ -186,6 +238,8 @@ the state file).
 - "start the bot": `status` first (paper? market open? Claude and Telegram
   on?), say the limits in plain words, then start `run` (`--dry-run` the
   first time) in the background and show the first log lines.
+- "analyse X" / "full analysis": `research X` (add `--fresh` for a new one)
+  and show the report; the verdict line is at the top.
 - "how did it do": `report`, then `trader/autopilot/journal.csv` across days
   and the Claude answers in `<date>.json`: which skips were right, which
   buys were wrong. A handful of days says little.

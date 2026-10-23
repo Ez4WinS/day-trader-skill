@@ -387,6 +387,127 @@ class Feeds(unittest.TestCase):
         self.assertIn("HTTP 401 from Telegram", logs[0])
 
 
+RDIR = os.path.join(FIX, "trader-autopilot")
+research = auto.research
+
+
+def monthly_chart():
+    """SYNTHETIC monthly bars (not market data): 2016-11 to 2026-10, price doubling every 4 years, a dip in 2022."""
+    ts, o, h, l, c = [], [], [], [], []
+    d = DT(2016, 11, 1)
+    while d <= DT(2026, 10, 1):
+        k = (d.year - 2016) * 12 + d.month - 11
+        p = 30.0 * 2 ** (k / 48.0) * (0.7 if d.year == 2022 else 1.0)
+        ts.append(int((d - DT(1970, 1, 1)).total_seconds()))
+        o.append(p); h.append(p * 1.05); l.append(p * 0.95); c.append(p)
+        d = DT(d.year + (d.month == 12), d.month % 12 + 1, 1)
+    return {"chart": {"result": [{"meta": {"regularMarketPrice": c[-1], "longName": "Demo Inc."}, "timestamp": ts,
+                                   "indicators": {"quote": [{"open": o, "high": h, "low": l, "close": c}]}}]}}
+
+
+class Research(unittest.TestCase):
+    def test_apple_quarters_years_and_ttm_from_the_sec_facts(self):
+        with open(os.path.join(RDIR, "companyfacts-CIK0000320193.json")) as fh:
+            f = research.fundamentals(json.load(fh))
+        self.assertEqual(f["ttm"], {"revenue_m": 466823.0, "net_income_m": 128930.0, "eps_diluted": 8.71})
+        q = f["quarters"][0]
+        self.assertEqual((q["fiscal"], q["revenue_m"], q["revenue_yoy_pct"], q["gross_margin_pct"], q["eps_diluted"]),
+                         ("Q3 2026", 109417.0, 16.4, 50.1, 2.02))
+        self.assertEqual((f["years"][0]["fiscal_year"], f["years"][0]["revenue_growth_pct"]), (2025, 6.4))
+
+    def test_results_dates_and_the_next_estimate(self):
+        sub = {"filings": {"recent": {"form": ["8-K", "10-Q", "8-K", "8-K", "8-K"],
+                                      "filingDate": ["2026-07-30", "2026-07-31", "2026-04-30", "2026-01-29", "2026-03-02"],
+                                      "items": ["2.02,9.01", "", "2.02", "2.02", "5.02"]}}}
+        e = research.earnings_dates(sub, datetime.date(2026, 10, 19))
+        self.assertEqual(e["past_results_8k"], ["2026-07-30", "2026-04-30", "2026-01-29"])
+        self.assertEqual((e["next_results_estimate"], e["days_to_next_estimate"]), ("2026-10-29", 10))
+        self.assertEqual(e["latest_report"], {"form": "10-Q", "filed": "2026-07-31"})
+
+    def test_ten_years_of_prices(self):
+        p = research.price_history(monthly_chart())
+        y2022 = [y for y in p["by_year"] if y["year"] == 2022][0]
+        y2023 = [y for y in p["by_year"] if y["year"] == 2023][0]
+        self.assertAlmostEqual(y2022["return_pct"], -16.8, delta=0.1)   # a year of growth (x1.19) times the 0.7 dip
+        self.assertAlmostEqual(y2023["return_pct"], 69.9, delta=0.1)    # back from the dip plus a year of growth
+        self.assertEqual((p["range_low_month"], p["range_high_month"]), ("2016-11", "2026-10"))
+        self.assertAlmostEqual(p["cagr_8y_pct"], 18.9, delta=0.2)   # doubling every 4 years
+
+
+class FakeResearchClient(object):
+    """Pauses once (a long web-search turn), then finishes; the verdict call returns JSON."""
+
+    def __init__(self):
+        self.calls = []
+
+        def create(_s, **kw):
+            self.calls.append(kw)
+            if "tools" in kw:
+                if len([c for c in self.calls if "tools" in c]) == 1:
+                    return Res("Teil 1. ", stop="pause_turn")
+                return Res("Teil 2.")
+            return Res(json.dumps({"rating": "good", "score": 72, "long_term_trend": "up",
+                                   "next_results_date": "2026-10-29", "results_within_2_days": False,
+                                   "summary": "Solide.", "strengths": ["Marge"], "risks": ["Zoelle"]}))
+        self.beta = type("Beta", (), {"messages": type("M", (), {"create": create})()})()
+
+
+@unittest.skipUnless(__import__("importlib").util.find_spec("anthropic"), "pip install anthropic")
+class ResearchCalls(unittest.TestCase):
+    def test_web_search_turn_is_resumed_and_the_verdict_parsed(self):
+        client = FakeResearchClient()
+        brain = auto.Brain("claude-opus-5-5", "medium", client=client)
+        text, err = brain.research({"symbol": "AAPL"}, web_searches=5, effort="high")
+        self.assertEqual((text, err), ("Teil 1. Teil 2.", None))
+        first, second = client.calls[0], client.calls[1]
+        self.assertEqual(first["tools"], [{"type": "web_search_20260209", "name": "web_search", "max_uses": 5}])
+        self.assertEqual(first["output_config"], {"effort": "high"})
+        self.assertEqual(second["messages"][1]["role"], "assistant")   # the paused turn is sent back, no extra user message
+        self.assertEqual(len(second["messages"]), 2)
+        self.assertEqual(brain.verdict("AAPL", text)["rating"], "good")
+
+
+class FakeResearcher(object):
+    def __init__(self):
+        self.asked = []
+
+    def get(self, symbol, now, force=False):
+        self.asked.append(symbol)
+        return {"symbol": symbol, "made": "2026-10-19T08:50:00",
+                "verdict": {"rating": "avoid", "score": 20, "results_within_2_days": True},
+                "numbers": {"price": {"trend": "down", "by_year": [{"year": 2025, "return_pct": -30.0}]},
+                            "fundamentals": {"quarters": [{"fiscal": "Q3 2026"}], "ttm": {}},
+                            "earnings": {"next_results_estimate": "2026-10-20", "days_to_next_estimate": 1}}}
+
+
+class ResearchInTheDecision(unittest.TestCase):
+    def test_the_entry_decision_sees_the_analysis(self):
+        d = tempfile.mkdtemp()
+        try:
+            brain, rs = FakeBrain(), FakeResearcher()
+            b = auto.Bot(cfg(), FakeBroker(), folder=d, out=io.StringIO(), fetch=lambda s, now: bars(),
+                         sleep=lambda s: None, brain=brain, news=FakeNews(), telegram=FakeTelegram(), researcher=rs)
+            b.load_state(DAY)
+            b.tick(at("10:15"))
+            r = brain.asked[0]["research"]
+            self.assertEqual(rs.asked, ["TSLA"])
+            self.assertEqual((r["verdict"]["rating"], r["price_10y"]["trend"], r["days_to_next_results"]), ("avoid", "down", 1))
+            self.assertEqual(r["yearly_returns_pct"], {"2025": -30.0})
+        finally:
+            shutil.rmtree(d)
+
+    def test_a_stored_analysis_is_reused_until_it_is_old(self):
+        d = tempfile.mkdtemp()
+        try:
+            rs = auto.Researcher(cfg(), d, None, None, lambda m: None)
+            old = {"symbol": "AAPL", "made": "2026-10-15T09:00:00", "verdict": {}}
+            self.assertTrue(rs.fresh(old, at("10:15")))
+            self.assertFalse(rs.fresh(dict(old, made="2026-10-01T09:00:00"), at("10:15")))
+            self.assertFalse(rs.fresh(None, at("10:15")))
+        finally:
+            shutil.rmtree(d)
+
+
 class Safety(unittest.TestCase):
     def test_keys_only_from_the_environment(self):
         with self.assertRaises(auto.AutopilotError) as cm:
